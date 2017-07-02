@@ -385,6 +385,8 @@ void do_scroll_down(void);
 void do_left(void);
 void do_right(void);
 
+void do_jump_void(void);
+
 /* Most functions in nano.c. */
 filestruct *make_new_node(filestruct *prevnode);
 void splice_node(filestruct *afterthis, filestruct *newnode);

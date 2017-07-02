@@ -496,6 +496,7 @@ void shortcut_init(void)
     /* TRANSLATORS: The next long series of strings are shortcut descriptions;
      * they are best kept shorter than 56 characters, but may be longer. */
     const char *nano_cancel_msg = N_("Cancel the current function");
+    const char *nano_jump_msg = N_("Enter jump-mode");
     const char *nano_help_msg = N_("Display this help text");
     const char *nano_exit_msg =
 #ifdef ENABLE_MULTIBUFFER
@@ -1044,9 +1045,12 @@ void shortcut_init(void)
 	N_("Next Lint Msg"), IFSCHELP(nano_nextlint_msg), TOGETHER, VIEW);
 #endif
 
+    add_to_funcs(do_jump_void, MMAIN,
+	N_("jump-mode"), IFSCHELP(nano_jump_msg), TOGETHER, VIEW);
+
     /* Start associating key combos with functions in specific menus. */
 
-    add_to_sclist(MMOST & ~MFINDINHELP, "^G", 0, do_help_void, 0);
+    add_to_sclist(MMAIN, "^G", 0, do_jump_void, 0);
     add_to_sclist(MMOST & ~MFINDINHELP, "F1", 0, do_help_void, 0);
     add_to_sclist(MMAIN|MHELP|MBROWSER, "^X", 0, do_exit, 0);
     add_to_sclist(MMAIN|MHELP|MBROWSER, "F2", 0, do_exit, 0);
@@ -1423,6 +1427,8 @@ sc *strtosc(const char *input)
 	s->scfunc = discard_buffer;
     else if (!strcasecmp(input, "writeout"))
 	s->scfunc = do_writeout_void;
+    else if (!strcasecmp(input, "jump"))
+	s->scfunc = do_jump_void;
 #ifndef NANO_TINY
     else if (!strcasecmp(input, "savefile"))
 	s->scfunc = do_savefile;

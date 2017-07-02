@@ -37,7 +37,8 @@ nano_SOURCES =	browser.c \
 		search.c \
 		text.c \
 		utils.c \
-		winio.c 
+		winio.c \
+		jump.c
 
 nano_LDADD = @LIBINTL@ $(top_builddir)/lib/libgnu.a $(LIB_CLOCK_GETTIME)
 
