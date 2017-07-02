@@ -385,6 +385,7 @@ void do_scroll_down(void);
 void do_left(void);
 void do_right(void);
 
+char do_char_prompt(const char *message);
 void do_jump_void(void);
 
 /* Most functions in nano.c. */
