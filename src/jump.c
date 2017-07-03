@@ -34,7 +34,7 @@ typedef struct _node {
 	struct _node *next;
 } node_t;
 
-int do_highlight(WINDOW *win, char c, node_t **heads, node_t **tails) {
+int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
 	int p = 0, num_highlighted = 0;
 
 	// highlight initial
@@ -79,6 +79,41 @@ int do_highlight(WINDOW *win, char c, node_t **heads, node_t **tails) {
 	return num_highlighted;
 }
 
+int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tails) {
+	int p = 0, num_highlighted = 0;
+
+	// highlight initial
+	wmove(win, 0, 0);
+
+	while (these != NULL) {
+	  wattron(win, A_STANDOUT | A_BOLD);
+	  mvwaddch(win, these->y, these->x, header_chars[p]);
+
+	  if (heads[p] == NULL) {
+		heads[p] = malloc(sizeof(node_t));
+		tails[p] = heads[p];
+	  } else {
+		tails[p]->next = malloc(sizeof(node_t));
+		tails[p] = tails[p]->next;
+	  }
+	  tails[p]->y = these->y; tails[p]->x = these->x;
+	  tails[p]->c = these->c;
+	  tails[p]->next = NULL;
+				
+	  p++;
+	  if (header_chars[p] == '\0') { p = 0; }
+	  num_highlighted++;
+
+	  these = these->next;
+				
+	  wattroff(win, A_STANDOUT | A_BOLD);
+	}	  
+
+	wrefresh(win);
+
+	return num_highlighted;
+}
+
 void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails) {
 	for (int i = 0; i < strlen(header_chars); i++) {
 		node_t *cur = heads[i];
@@ -94,14 +129,17 @@ void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails) {
 		}
 	}
 	wrefresh(win);
-	
-	free(heads);
-	free(tails);
+
+	for (int i = 0; i < strlen(header_chars); i++) {
+	  heads[i] = NULL; tails[i] = NULL;
+	}
 }
 
 void do_jump(void) {
 	int prev_y, prev_x;
 	getyx(edit, prev_y, prev_x);
+	int prev_line = openfile->current->lineno;
+	int prev_col = xplustabs() + 1;
 	
 	char head_char = do_char_prompt(_("Head char: "));
 	head_char = tolower(head_char);
@@ -118,13 +156,16 @@ void do_jump(void) {
 	}
 	
 	// setup
-	node_t **heads = malloc(sizeof(node_t*) * strlen(header_chars));
-	node_t **tails = malloc(sizeof(node_t*) * strlen(header_chars));
+	node_t *heads[strlen(header_chars)];
+	node_t *tails[strlen(header_chars)];
 	for (int i = 0; i < strlen(header_chars); i++) {
 		heads[i] = NULL; tails[i] = NULL;
 	}
 
-	int num_highlighted = do_highlight(edit, head_char, heads, tails);
+	int num_highlighted = do_highlight_char(edit, head_char, heads, tails);
+	bool recursed = false;
+ narrow:
+	blank_statusbar();
 	if (num_highlighted <= 0) {
 		cleanup_highlight(edit, heads, tails);
 		statusbar(_("jump-mode: No one found"));
@@ -134,10 +175,12 @@ void do_jump(void) {
 	char select_char = '\0';
 	if (num_highlighted == 1) {
 		select_char = header_chars[0];
-		statusbar(_("jump-mode: One candidate, move to it directly"));
+		if (!recursed) {
+		  statusbar(_("jump-mode: One candidate, move to it directly"));
+		}
 	} else {
-		select_char = do_char_prompt(_("Select: "));
-		blank_statusbar();
+	  select_char = do_char_prompt(_("Select: "));
+	  blank_statusbar();
 	}
 	
 	if (select_char == '\0') {
@@ -154,13 +197,38 @@ void do_jump(void) {
 	}
 	
 	node_t *list = heads[list_idx];
+
+	if (num_highlighted > strlen(header_chars)) {
+	  node_t *save = NULL, *cur = NULL;
+	  save = malloc(sizeof(node_t)); cur = save;
+	  do {
+		cur->x = list->x; cur->y = list->y;
+		cur->c = list->c;
+		if (list->next != NULL) {
+		  cur->next = malloc(sizeof(node_t));
+		} else (cur->next = NULL);
+		cur = cur->next; list = list->next;
+	  } while (list != NULL);
+	  cleanup_highlight(edit, heads, tails);
+	  num_highlighted = do_highlight_these(edit, save, heads, tails);
+	  while (save != NULL) {
+		node_t *trash = save;
+		save = save->next;
+		free(trash);
+	  }
+	  recursed = true;
+	  goto narrow;
+	}
+	
 	int final_y = list->y, final_x = list->x;
 	int delta_y = final_y - prev_y;
 	int delta_x = final_x - prev_x;
 
-	goto_line_posx(openfile->current->lineno + delta_y, openfile->placewewant + delta_x);
-	
 	cleanup_highlight(edit, heads, tails);
+
+	goto_line_posx(prev_line, prev_x + delta_x);
+	if (delta_y > 0) { for (int i = 0; i < delta_y; i++) { do_down(false); } }
+	if (delta_y < 0) { for (int i = 0; i > delta_y; i--) { do_up(false); } }
 }
 
 void do_jump_void(void) {
