@@ -1,5 +1,6 @@
 /**************************************************************************
  *   jump.c  --  This file is part of GNU nano.                           *
+ *     this file: 2017 Andrew D'Angelo <dangeloandrew at outlook dot com> *
  *                                                                        *
  *   Copyright (C) 2000-2011, 2013-2017 Free Software Foundation, Inc.    *
  *   Copyright (C) 2017 Rishabh Dave                                      *
@@ -27,116 +28,37 @@
 #include <ctype.h>
 #include <errno.h>
 
+// TODO: add nanorc options to enable jumping inside words and setting `header_chars`
 static char *header_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+static int max_depth = 10;
 typedef struct _node {
 	int y, x;
 	char c;
 	struct _node *next;
 } node_t;
 
-int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
-	int p = 0, num_highlighted = 0;
+// prompt for a single character of input (submits automatically)
+char do_char_prompt(const char *msg);
 
-	// highlight initial
-	int y = 0, x = 0;
-	char at[2];
-	wmove(win, 0, 0);
-	
-	while (mvwinnstr(win, y, x, at, 1) > 0) {
-		bool prev_was_space = true;
-		while (mvwinnstr(win, y, x, at, 1) > 0) {
-			if (tolower(at[0]) == c) {
-				if (prev_was_space == true) {
-					wattron(win, A_STANDOUT | A_BOLD);
-					mvwaddch(win, y, x, header_chars[p]);
+// construct a copy of `node` and insert into the given linked-list
+void emplace(node_t *node, node_t **head_ptr, node_t **tail_ptr);
 
-					if (heads[p] == NULL) {
-						heads[p] = malloc(sizeof(node_t));
-						tails[p] = heads[p];
-					} else {
-						tails[p]->next = malloc(sizeof(node_t));
-						tails[p] = tails[p]->next;
-					}
-					tails[p]->y = y; tails[p]->x = x;
-					tails[p]->c = at[0];
-					tails[p]->next = NULL;
-				
-					p++;
-					if (header_chars[p] == '\0') { p = 0; }
-					num_highlighted++;
-				
-					wattroff(win, A_STANDOUT | A_BOLD);
-				}
-			}
-			prev_was_space = (at[0] == ' ');
-			x++;
-		}
-		x = 0;
-		y++;
-	}
-	wrefresh(win);
+// highlight all occurences of `c` in the given window according to the `header_chars`
+// order. If a location is highlighted with the character 'a', a new linked-list
+// node will be emplaced into `heads[(location of 'a' in header_chars)]`.
+int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails);
 
-	return num_highlighted;
-}
+// highlight all locations referred to by the nodes of `these`. New nodes will
+// be emplaced into the `heads` array as in `do_highlight_char`.
+int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tails);
 
-int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tails) {
-	int p = 0, num_highlighted = 0;
+// Restore all locations in the lists of `heads` to their original state and
+// delete the linked-list nodes.
+void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails);
 
-	// highlight initial
-	wmove(win, 0, 0);
-
-	while (these != NULL) {
-	  wattron(win, A_STANDOUT | A_BOLD);
-	  mvwaddch(win, these->y, these->x, header_chars[p]);
-
-	  if (heads[p] == NULL) {
-		heads[p] = malloc(sizeof(node_t));
-		tails[p] = heads[p];
-	  } else {
-		tails[p]->next = malloc(sizeof(node_t));
-		tails[p] = tails[p]->next;
-	  }
-	  tails[p]->y = these->y; tails[p]->x = these->x;
-	  tails[p]->c = these->c;
-	  tails[p]->next = NULL;
-				
-	  p++;
-	  if (header_chars[p] == '\0') { p = 0; }
-	  num_highlighted++;
-
-	  these = these->next;
-				
-	  wattroff(win, A_STANDOUT | A_BOLD);
-	}	  
-
-	wrefresh(win);
-
-	return num_highlighted;
-}
-
-void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails) {
-	for (int i = 0; i < strlen(header_chars); i++) {
-		node_t *cur = heads[i];
-		while (cur != NULL) {
-			node_t *trash = cur;
-
-			// restore old character
-			wattroff(win, A_STANDOUT | A_BOLD);
-			mvwaddch(win, cur->y, cur->x, cur->c);
-			
-			cur = cur->next;
-			free(trash);
-		}
-	}
-	wrefresh(win);
-
-	for (int i = 0; i < strlen(header_chars); i++) {
-	  heads[i] = NULL; tails[i] = NULL;
-	}
-}
-
+// the main read-eval-jump loop:
 void do_jump(void) {
-	int prev_y, prev_x;
+	int prev_y = 0, prev_x = 0;
 	getyx(edit, prev_y, prev_x);
 	int prev_line = openfile->current->lineno;
 	int prev_col = xplustabs() + 1;
@@ -158,73 +80,87 @@ void do_jump(void) {
 	// setup
 	node_t *heads[strlen(header_chars)];
 	node_t *tails[strlen(header_chars)];
+	node_t *saved_head = NULL, *saved_tail = NULL; // when we recurse on chars
 	for (int i = 0; i < strlen(header_chars); i++) {
 		heads[i] = NULL; tails[i] = NULL;
 	}
 
-	int num_highlighted = do_highlight_char(edit, head_char, heads, tails);
-	bool recursed = false;
- narrow:
-	blank_statusbar();
-	if (num_highlighted <= 0) {
-		cleanup_highlight(edit, heads, tails);
-		statusbar(_("jump-mode: No one found"));
-		return;
-	}
+	int num_highlighted;
+	int recursed = 0;
 
-	char select_char = '\0';
-	if (num_highlighted == 1) {
-		select_char = header_chars[0];
+	int final_y, final_x;
+
+	while (recursed < max_depth) {
+		// give choices to narrow on
 		if (!recursed) {
-		  statusbar(_("jump-mode: One candidate, move to it directly"));
+			num_highlighted = do_highlight_char(edit, head_char, heads, tails);
+		} else {
+			num_highlighted = do_highlight_these(edit, saved_head, heads, tails);
+			while (saved_head != NULL) {
+				node_t *trash = saved_head;
+				saved_head = saved_head->next;
+				free(trash);
+			}
 		}
-	} else {
-	  select_char = do_char_prompt(_("Select: "));
-	  blank_statusbar();
-	}
-	
-	if (select_char == '\0') {
-		cleanup_highlight(edit, heads, tails);
-		statusbar(_("Cancelled"));
-		return;
-	}
-	
-	int list_idx = (int)(strchr(header_chars, select_char) - header_chars);
-	if ((list_idx < 0) || (list_idx >= num_highlighted)) {
-		cleanup_highlight(edit, heads, tails);
-		statusbar(_("jump-mode: No such position candidate"));
-		return;
-	}
-	
-	node_t *list = heads[list_idx];
 
-	if (num_highlighted > strlen(header_chars)) {
-	  node_t *save = NULL, *cur = NULL;
-	  save = malloc(sizeof(node_t)); cur = save;
-	  do {
-		cur->x = list->x; cur->y = list->y;
-		cur->c = list->c;
-		if (list->next != NULL) {
-		  cur->next = malloc(sizeof(node_t));
-		} else (cur->next = NULL);
-		cur = cur->next; list = list->next;
-	  } while (list != NULL);
-	  cleanup_highlight(edit, heads, tails);
-	  num_highlighted = do_highlight_these(edit, save, heads, tails);
-	  while (save != NULL) {
-		node_t *trash = save;
-		save = save->next;
-		free(trash);
-	  }
-	  recursed = true;
-	  goto narrow;
+		blank_statusbar();
+		
+		if (num_highlighted <= 0) { // picked a nonexistent char
+			cleanup_highlight(edit, heads, tails);
+			statusbar(_("jump-mode: No one found"));
+			return;
+		}
+		
+		if (num_highlighted == 1) { // picked the only occurrence
+			if (!recursed) {
+				statusbar(_("jump-mode: One candidate, move to it directly"));
+			}
+			final_y = heads[0]->y;
+			final_x = heads[0]->x;
+			break;
+		}
+
+		// have to narrow down some more
+		char select_char = '\0';
+		select_char = do_char_prompt(_("Select: "));
+		blank_statusbar();
+		
+		if (select_char == '\0') { // user cancelled
+			cleanup_highlight(edit, heads, tails);
+			statusbar(_("Cancelled"));
+			return;
+		}
+
+		// see what index the user picked
+		int list_idx = (int)(strchr(header_chars, select_char) - header_chars);
+		if ((list_idx < 0) || (list_idx >= num_highlighted)) {
+			cleanup_highlight(edit, heads, tails);
+			statusbar(_("jump-mode: No such position candidate"));
+			return;
+		}
+
+		// get the list of chars corresponding to index
+		node_t *list = heads[list_idx];
+		if (num_highlighted > strlen(header_chars)) {
+			do { // back up the list before cleaning this hilite
+				emplace(list, &saved_head, &saved_tail);
+				list = list->next;
+			} while (list != NULL);
+			cleanup_highlight(edit, heads, tails);
+			
+			recursed++;
+			continue; // narrow down some more
+		} else { // got a final result
+			final_y = list->y;
+			final_x = list->x;
+			break;
+		}
 	}
 	
-	int final_y = list->y, final_x = list->x;
+	cleanup_highlight(edit, heads, tails);
+	
 	int delta_y = final_y - prev_y;
 	int delta_x = final_x - prev_x;
-
-	cleanup_highlight(edit, heads, tails);
 
 	goto_line_posx(prev_line, prev_x + delta_x);
 	if (delta_y > 0) { for (int i = 0; i < delta_y; i++) { do_down(false); } }
@@ -239,14 +175,7 @@ void do_jump_void(void) {
 	}
 }
 
-void jump_abort(void) {
-	if (openfile->mark_set) {
-		refresh_needed = TRUE;
-	}
-}
-
-char do_char_prompt(const char *msg)
-{
+char do_char_prompt(const char *msg) {
 	char response = '\0';
 	int width = 16;
 	char *message = display_string(msg, 0, COLS, FALSE);
@@ -291,4 +220,107 @@ char do_char_prompt(const char *msg)
 	free(message);
 
 	return response;
+}
+
+void emplace(node_t *node, node_t **head_ptr, node_t **tail_ptr) {
+	node_t *head = *head_ptr;
+	node_t *tail = *tail_ptr;
+	if (head == NULL) {
+		head = malloc(sizeof(node_t));
+		*head_ptr = head;
+		*tail_ptr = head;
+		tail = head;
+	} else {
+		tail->next = malloc(sizeof(node_t));
+		tail = tail->next;
+		*tail_ptr = tail;
+	}
+	tail->y = node->y;
+	tail->x = node->x;
+	tail->c = node->c;
+	tail->next = NULL;
+}
+
+int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
+	int p = 0, num_highlighted = 0;
+
+	// highlight initial
+	int y = 0, x = 0;
+	char at[2];
+	wmove(win, 0, 0);
+	
+	while (mvwinnstr(win, y, x, at, 1) > 0) {
+		bool prev_was_space = true;
+		while (mvwinnstr(win, y, x, at, 1) > 0) {
+			if (tolower(at[0]) == c) {
+				if (prev_was_space == true) {
+					wattron(win, A_STANDOUT | A_BOLD);
+					mvwaddch(win, y, x, header_chars[p]);
+
+					node_t new = (node_t){y, x, at[0], NULL};
+					emplace(&new, &heads[p], &tails[p]);
+				
+					p++;
+					if (header_chars[p] == '\0') { p = 0; }
+					num_highlighted++;
+				
+					wattroff(win, A_STANDOUT | A_BOLD);
+				}
+			}
+			prev_was_space = (at[0] == ' ');
+			x++;
+		}
+		x = 0;
+		y++;
+	}
+	wrefresh(win);
+
+	return num_highlighted;
+}
+
+int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tails) {
+	int p = 0, num_highlighted = 0;
+
+	// highlight initial
+	wmove(win, 0, 0);
+
+	while (these != NULL) {
+		wattron(win, A_STANDOUT | A_BOLD);
+		mvwaddch(win, these->y, these->x, header_chars[p]);
+
+		emplace(these, &heads[p], &tails[p]);
+				
+		p++;
+		if (header_chars[p] == '\0') { p = 0; }
+		num_highlighted++;
+
+		these = these->next;
+				
+		wattroff(win, A_STANDOUT | A_BOLD);
+	}
+
+	wrefresh(win);
+
+	return num_highlighted;
+}
+
+void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails) {
+	for (int i = 0; i < strlen(header_chars); i++) {
+		node_t *cur = heads[i];
+		while (cur != NULL) {
+			node_t *trash = cur;
+
+			// restore old character
+			wattroff(win, A_STANDOUT | A_BOLD);
+			mvwaddch(win, cur->y, cur->x, cur->c);
+			
+			cur = cur->next;
+			free(trash);
+		}
+	}
+	wrefresh(win);
+
+	for (int i = 0; i < strlen(header_chars); i++) {
+		heads[i] = NULL; tails[i] = NULL;
+	}
 }
