@@ -27,21 +27,140 @@
 #include <ctype.h>
 #include <errno.h>
 
-void do_jump(void) {
-	char c = do_char_prompt(_("Head char: "));
+static char *header_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+typedef struct _node {
+	int y, x;
+	char c;
+	struct _node *next;
+} node_t;
 
-	if (c == '\0') {
+int do_highlight(WINDOW *win, char c, node_t **heads, node_t **tails) {
+	int p = 0, num_highlighted = 0;
+
+	// highlight initial
+	int y = 0, x = 0;
+	char at[2];
+	wmove(win, 0, 0);
+	
+	while (mvwinnstr(win, y, x, at, 1) > 0) {
+		bool prev_was_space = true;
+		while (mvwinnstr(win, y, x, at, 1) > 0) {
+			if (tolower(at[0]) == c) {
+				if (prev_was_space == true) {
+					wattron(win, A_STANDOUT | A_BOLD);
+					mvwaddch(win, y, x, header_chars[p]);
+
+					if (heads[p] == NULL) {
+						heads[p] = malloc(sizeof(node_t));
+						tails[p] = heads[p];
+					} else {
+						tails[p]->next = malloc(sizeof(node_t));
+						tails[p] = tails[p]->next;
+					}
+					tails[p]->y = y; tails[p]->x = x;
+					tails[p]->c = at[0];
+					tails[p]->next = NULL;
+				
+					p++;
+					if (header_chars[p] == '\0') { p = 0; }
+					num_highlighted++;
+				
+					wattroff(win, A_STANDOUT | A_BOLD);
+				}
+			}
+			prev_was_space = (at[0] == ' ');
+			x++;
+		}
+		x = 0;
+		y++;
+	}
+	wrefresh(win);
+
+	return num_highlighted;
+}
+
+void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails) {
+	for (int i = 0; i < strlen(header_chars); i++) {
+		node_t *cur = heads[i];
+		while (cur != NULL) {
+			node_t *trash = cur;
+
+			// restore old character
+			wattroff(win, A_STANDOUT | A_BOLD);
+			mvwaddch(win, cur->y, cur->x, cur->c);
+			
+			cur = cur->next;
+			free(trash);
+		}
+	}
+	wrefresh(win);
+	
+	free(heads);
+	free(tails);
+}
+
+void do_jump(void) {
+	int prev_y, prev_x;
+	getyx(edit, prev_y, prev_x);
+	
+	char head_char = do_char_prompt(_("Head char: "));
+	head_char = tolower(head_char);
+
+	if (head_char == '\0') {
 		statusbar(_("Cancelled"));
 		return;
-	} else if (c == '\1') {
+	} else if (head_char == '\1') {
 		statusbar(_("jump-mode: Unprintable character"));
+		return;
+	} else if (head_char == ' ') {
+		statusbar(_("jump-mode: Don't support jumping to 'space'"));
+		return;
+	}
+	
+	// setup
+	node_t **heads = malloc(sizeof(node_t*) * strlen(header_chars));
+	node_t **tails = malloc(sizeof(node_t*) * strlen(header_chars));
+	for (int i = 0; i < strlen(header_chars); i++) {
+		heads[i] = NULL; tails[i] = NULL;
+	}
+
+	int num_highlighted = do_highlight(edit, head_char, heads, tails);
+	if (num_highlighted <= 0) {
+		cleanup_highlight(edit, heads, tails);
+		statusbar(_("jump-mode: No one found"));
 		return;
 	}
 
-	char *r;
-	asprintf(&r, "Got answer: %c", c);
-	statusbar(_(r));
-	free(r);
+	char select_char = '\0';
+	if (num_highlighted == 1) {
+		select_char = header_chars[0];
+		statusbar(_("jump-mode: One candidate, move to it directly"));
+	} else {
+		select_char = do_char_prompt(_("Select: "));
+		blank_statusbar();
+	}
+	
+	if (select_char == '\0') {
+		cleanup_highlight(edit, heads, tails);
+		statusbar(_("Cancelled"));
+		return;
+	}
+	
+	int list_idx = (int)(strchr(header_chars, select_char) - header_chars);
+	if ((list_idx < 0) || (list_idx >= num_highlighted)) {
+		cleanup_highlight(edit, heads, tails);
+		statusbar(_("jump-mode: No such position candidate"));
+		return;
+	}
+	
+	node_t *list = heads[list_idx];
+	int final_y = list->y, final_x = list->x;
+	int delta_y = final_y - prev_y;
+	int delta_x = final_x - prev_x;
+
+	goto_line_posx(openfile->current->lineno + delta_y, openfile->placewewant + delta_x);
+	
+	cleanup_highlight(edit, heads, tails);
 }
 
 void do_jump_void(void) {
