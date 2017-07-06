@@ -243,10 +243,11 @@ int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
 	char *at = &line_ptr->data[col];
 	bool prev_was_space = true;
 	
-	while ((y <= max_y) && (x <= max_x)) {
+	while ((y <= max_y) && (x <= max_x) && (line_ptr != NULL)) {
 		if (*at == '\0') { // reached the end of the line data
 			line++; col = 0;
 			y++; x = 0;
+			if (line_ptr->next == NULL) { break; }
 			if (line_ptr->next->lineno != line_ptr->lineno) {
 				prev_was_space = true;
 			}
@@ -282,6 +283,7 @@ int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
 			if (!ISSET(SOFTWRAP) && (*at != '\0')) { // reached the end of the screen but there's more
 				prev_was_space = true;
 				line_ptr = line_ptr->next;
+				if (line_ptr == NULL) { break; }
 				line++; col = 0;
 				at = &line_ptr->data[col];
 			}
