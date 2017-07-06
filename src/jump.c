@@ -33,6 +33,7 @@ static char *header_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY
 static int max_depth = 10;
 typedef struct _node {
 	int y, x;
+	int line, col;
 	char c;
 	struct _node *next;
 } node_t;
@@ -58,11 +59,6 @@ void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails);
 
 // the main read-eval-jump loop:
 void do_jump(void) {
-	int prev_y = 0, prev_x = 0;
-	getyx(edit, prev_y, prev_x);
-	int prev_line = openfile->current->lineno;
-	int prev_col = xplustabs() + 1;
-	
 	char head_char = do_char_prompt(_("Head char: "));
 	head_char = tolower(head_char);
 
@@ -88,7 +84,7 @@ void do_jump(void) {
 	int num_highlighted;
 	int recursed = 0;
 
-	int final_y, final_x;
+	int final_line = 0, final_col = 0;
 
 	while (recursed < max_depth) {
 		// give choices to narrow on
@@ -115,8 +111,8 @@ void do_jump(void) {
 			if (!recursed) {
 				statusbar(_("jump-mode: One candidate, move to it directly"));
 			}
-			final_y = heads[0]->y;
-			final_x = heads[0]->x;
+			final_line = heads[0]->line;
+			final_col = heads[0]->col;
 			break;
 		}
 
@@ -151,20 +147,15 @@ void do_jump(void) {
 			recursed++;
 			continue; // narrow down some more
 		} else { // got a final result
-			final_y = list->y;
-			final_x = list->x;
+			final_line = list->line;
+			final_col = list->col;
 			break;
 		}
 	}
 	
 	cleanup_highlight(edit, heads, tails);
-	
-	int delta_y = final_y - prev_y;
-	int delta_x = final_x - prev_x;
-
-	goto_line_posx(prev_line, prev_x + delta_x);
-	if (delta_y > 0) { for (int i = 0; i < delta_y; i++) { do_down(false); } }
-	if (delta_y < 0) { for (int i = 0; i > delta_y; i--) { do_up(false); } }
+	do_gotolinecolumn(final_line, final_col + 1, false, false);
+	refresh_needed = TRUE;
 }
 
 void do_jump_void(void) {
@@ -235,9 +226,7 @@ void emplace(node_t *node, node_t **head_ptr, node_t **tail_ptr) {
 		tail = tail->next;
 		*tail_ptr = tail;
 	}
-	tail->y = node->y;
-	tail->x = node->x;
-	tail->c = node->c;
+	*tail = *node;
 	tail->next = NULL;
 }
 
@@ -246,18 +235,31 @@ int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
 
 	// highlight initial
 	int y = 0, x = 0;
-	char at[2];
-	wmove(win, 0, 0);
+	int max_y = 0, max_x = 0;
+	getmaxyx(win, max_y, max_x);
+	filestruct *line_ptr = openfile->edittop;
+	int line = openfile->edittop->lineno;
+	int col = openfile->firstcolumn;
+	char *at = &line_ptr->data[col];
+	bool prev_was_space = true;
 	
-	while (mvwinnstr(win, y, x, at, 1) > 0) {
-		bool prev_was_space = true;
-		while (mvwinnstr(win, y, x, at, 1) > 0) {
-			if (tolower(at[0]) == c) {
-				if (prev_was_space == true) {
+	while ((y <= max_y) && (x <= max_x)) {
+		if (*at == '\0') { // reached the end of the line data
+			line++; col = 0;
+			y++; x = 0;
+			if (line_ptr->next->lineno != line_ptr->lineno) {
+				prev_was_space = true;
+			}
+			line_ptr = line_ptr->next;
+			at = &line_ptr->data[col];
+			continue;
+		} else {
+			if (tolower(*at) == c) {
+				if (prev_was_space) {
 					wattron(win, A_STANDOUT | A_BOLD);
 					mvwaddch(win, y, x, header_chars[p]);
 
-					node_t new = (node_t){y, x, at[0], NULL};
+					node_t new = (node_t){y, x, line, col, *at, NULL};
 					emplace(&new, &heads[p], &tails[p]);
 				
 					p++;
@@ -267,12 +269,25 @@ int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
 					wattroff(win, A_STANDOUT | A_BOLD);
 				}
 			}
-			prev_was_space = (at[0] == ' ');
-			x++;
 		}
-		x = 0;
-		y++;
+		
+		prev_was_space = (*at == ' ');
+		size_t charwidth = 0;
+		parse_mbchar(at, NULL, &charwidth);
+		col += charwidth;
+		x += charwidth;
+		at++;
+		if (x >= editwincols) {
+			y++; x = 0;
+			if (!ISSET(SOFTWRAP) && (*at != '\0')) { // reached the end of the screen but there's more
+				prev_was_space = true;
+				line_ptr = line_ptr->next;
+				line++; col = 0;
+				at = &line_ptr->data[col];
+			}
+		}
 	}
+
 	wrefresh(win);
 
 	return num_highlighted;
@@ -289,13 +304,13 @@ int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tail
 		mvwaddch(win, these->y, these->x, header_chars[p]);
 
 		emplace(these, &heads[p], &tails[p]);
-				
+		
 		p++;
 		if (header_chars[p] == '\0') { p = 0; }
 		num_highlighted++;
 
 		these = these->next;
-				
+		
 		wattroff(win, A_STANDOUT | A_BOLD);
 	}
 
