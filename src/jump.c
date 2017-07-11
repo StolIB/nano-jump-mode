@@ -28,8 +28,29 @@
 #include <ctype.h>
 #include <errno.h>
 
-// TODO: add nanorc options to enable jumping inside words and setting `header_chars`
-static char *header_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+// TODO:
+// * more highlight determination (distinguish between symbol / alphanumeric)
+// * implement dimming of non-highlight chars
+// * condition jump-mode on compiling without NANO_TINY
+// * add nanorc options to enable:
+//   - jumping inside words
+//   - setting `label_chars`
+//   - screen behavior when moving cursor (default no centering)
+//   - highlight mode (color or bolding)
+
+static bool look_inside_words = false;
+static char *label_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+static bool recenter_screen = false;
+
+#ifdef DISABLE_COLOR
+static bool use_color = false;
+#else
+static bool use_color = true;
+#endif
+static int highlight_color = COLOR_YELLOW;
+static attr_t color_highlight_attr = A_STANDOUT | COLOR_PAIR(1);
+static attr_t nocolor_highlight_attr = A_STANDOUT;
+
 static int max_depth = 10;
 typedef struct _node {
 	int y, x;
@@ -44,9 +65,10 @@ char do_char_prompt(const char *msg);
 // construct a copy of `node` and insert into the given linked-list
 void emplace(node_t *node, node_t **head_ptr, node_t **tail_ptr);
 
-// highlight all occurences of `c` in the given window according to the `header_chars`
-// order. If a location is highlighted with the character 'a', a new linked-list
-// node will be emplaced into `heads[(location of 'a' in header_chars)]`.
+// highlight all occurences of `c` in the given window according to the
+// `label_chars` order. If a location is highlighted with the character
+// 'a', a new linked-list node will be emplaced into `heads[(location of
+// 'a' in label_chars)]`.
 int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails);
 
 // highlight all locations referred to by the nodes of `these`. New nodes will
@@ -57,8 +79,17 @@ int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tail
 // delete the linked-list nodes.
 void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails);
 
+// Move the cursor to the given line, col on screen (do not recenter the cursor)
+void move_cursor(ssize_t line, ssize_t column);
+
 // the main read-eval-jump loop:
 void do_jump(void) {
+	// read color preferences here
+	if (use_color && !has_colors()) { use_color = false; }
+	if (use_color) {
+		init_pair(1, highlight_color, COLOR_BLACK);
+	}
+
 	char head_char = do_char_prompt(_("Head char: "));
 	head_char = tolower(head_char);
 
@@ -74,10 +105,10 @@ void do_jump(void) {
 	}
 	
 	// setup
-	node_t *heads[strlen(header_chars)];
-	node_t *tails[strlen(header_chars)];
+	node_t *heads[strlen(label_chars)];
+	node_t *tails[strlen(label_chars)];
 	node_t *saved_head = NULL, *saved_tail = NULL; // when we recurse on chars
-	for (int i = 0; i < strlen(header_chars); i++) {
+	for (int i = 0; i < strlen(label_chars); i++) {
 		heads[i] = NULL; tails[i] = NULL;
 	}
 
@@ -128,7 +159,7 @@ void do_jump(void) {
 		}
 
 		// see what index the user picked
-		int list_idx = (int)(strchr(header_chars, select_char) - header_chars);
+		int list_idx = (int)(strchr(label_chars, select_char) - label_chars);
 		if ((list_idx < 0) || (list_idx >= num_highlighted)) {
 			cleanup_highlight(edit, heads, tails);
 			statusbar(_("jump-mode: No such position candidate"));
@@ -137,7 +168,7 @@ void do_jump(void) {
 
 		// get the list of chars corresponding to index
 		node_t *list = heads[list_idx];
-		if (num_highlighted > strlen(header_chars)) {
+		if (num_highlighted > strlen(label_chars)) {
 			do { // back up the list before cleaning this hilite
 				emplace(list, &saved_head, &saved_tail);
 				list = list->next;
@@ -154,7 +185,11 @@ void do_jump(void) {
 	}
 	
 	cleanup_highlight(edit, heads, tails);
-	do_gotolinecolumn(final_line, final_col + 1, false, false);
+	if (recenter_screen) {
+		do_gotolinecolumn(final_line, final_col + 1, false, false);
+	} else {
+		move_cursor(final_line, final_col + 1);
+	}
 	refresh_needed = TRUE;
 }
 
@@ -257,17 +292,17 @@ int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
 		} else {
 			if (tolower(*at) == c) {
 				if (prev_was_space) {
-					wattron(win, A_STANDOUT | A_BOLD);
-					mvwaddch(win, y, x, header_chars[p]);
+					wattron(win, use_color ? color_highlight_attr : nocolor_highlight_attr);
+					mvwaddch(win, y, x, label_chars[p]);
 
 					node_t new = (node_t){y, x, line, col, *at, NULL};
 					emplace(&new, &heads[p], &tails[p]);
 				
 					p++;
-					if (header_chars[p] == '\0') { p = 0; }
+					if (label_chars[p] == '\0') { p = 0; }
 					num_highlighted++;
 				
-					wattroff(win, A_STANDOUT | A_BOLD);
+					wattroff(win, use_color ? color_highlight_attr : nocolor_highlight_attr);
 				}
 			}
 		}
@@ -302,18 +337,18 @@ int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tail
 	wmove(win, 0, 0);
 
 	while (these != NULL) {
-		wattron(win, A_STANDOUT | A_BOLD);
-		mvwaddch(win, these->y, these->x, header_chars[p]);
+		wattron(win, use_color ? color_highlight_attr : nocolor_highlight_attr);
+		mvwaddch(win, these->y, these->x, label_chars[p]);
 
 		emplace(these, &heads[p], &tails[p]);
 		
 		p++;
-		if (header_chars[p] == '\0') { p = 0; }
+		if (label_chars[p] == '\0') { p = 0; }
 		num_highlighted++;
 
 		these = these->next;
 		
-		wattroff(win, A_STANDOUT | A_BOLD);
+		wattroff(win, use_color ? color_highlight_attr : nocolor_highlight_attr);
 	}
 
 	wrefresh(win);
@@ -322,13 +357,13 @@ int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tail
 }
 
 void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails) {
-	for (int i = 0; i < strlen(header_chars); i++) {
+	for (int i = 0; i < strlen(label_chars); i++) {
 		node_t *cur = heads[i];
 		while (cur != NULL) {
 			node_t *trash = cur;
 
 			// restore old character
-			wattroff(win, A_STANDOUT | A_BOLD);
+			wattroff(win, use_color ? color_highlight_attr : nocolor_highlight_attr);
 			mvwaddch(win, cur->y, cur->x, cur->c);
 			
 			cur = cur->next;
@@ -337,7 +372,36 @@ void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails) {
 	}
 	wrefresh(win);
 
-	for (int i = 0; i < strlen(header_chars); i++) {
+	for (int i = 0; i < strlen(label_chars); i++) {
 		heads[i] = NULL; tails[i] = NULL;
+	}
+}
+
+void move_cursor(ssize_t line, ssize_t column)
+{ // copied from search.c, remove the code to recenter the screen
+	if (line == 0) line = openfile->current->lineno;
+	if (column == 0) column = openfile->placewewant + 1;
+
+	if (line < 0) line = openfile->filebot->lineno + line + 1;
+	if (line < 1) line = 1;
+
+	/* Iterate to the requested line. */
+	for (openfile->current = openfile->fileage;
+	     line > 1 && openfile->current != openfile->filebot;
+	     line--) {
+		openfile->current = openfile->current->next;
+	}
+
+	/* Take a negative column number to mean: from the end of the line. */
+	if (column < 0) column = strlenpt(openfile->current->data) + column + 2;
+	if (column < 1) column = 1;
+
+	/* Set the x position that corresponds to the requested column. */
+	openfile->current_x = actual_x(openfile->current->data, column - 1);
+	openfile->placewewant = column - 1;
+
+	if (ISSET(SOFTWRAP) && openfile->placewewant / editwincols >
+	    strlenpt(openfile->current->data) / editwincols) {
+		openfile->placewewant = strlenpt(openfile->current->data);
 	}
 }
