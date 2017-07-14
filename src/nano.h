@@ -519,7 +519,10 @@ enum
     JUSTIFY_TRIM,
     SHOW_CURSOR,
     LINE_NUMBERS,
-    NO_PAUSES
+    NO_PAUSES,
+    JUMP_INSIDE,
+    JUMP_CENTER,
+    JUMP_NOCOLOR
 };
 
 /* Flags for the menus in which a given function should be present. */

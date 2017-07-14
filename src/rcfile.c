@@ -110,6 +110,10 @@ static const rcoption rcopts[] = {
     {"whitespace", 0},
     {"wordbounds", WORD_BOUNDS},
     {"wordchars", 0},
+    {"jump-mode-inside", JUMP_INSIDE},
+    {"jump-mode-center", JUMP_CENTER},
+    {"jump-mode-no-color", JUMP_NOCOLOR},
+    {"jump-mode-label-chars", 0},
 #endif
 #ifndef DISABLE_COLOR
     {"titlecolor", 0},
@@ -1227,6 +1231,9 @@ void parse_rcfile(FILE *rcstream, bool syntax_only)
 	    }
 	    free(option);
 	} else
+	if (strcasecmp(rcopts[i].name, "jump-mode-label-chars") == 0)
+	    jump_mode_label_chars = option;
+	else
 	    assert(FALSE);
     }
 

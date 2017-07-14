@@ -121,6 +121,8 @@ extern char *quoteerr;
 
 extern char *word_chars;
 
+extern char *jump_mode_label_chars;
+
 extern char *answer;
 
 extern ssize_t tabsize;

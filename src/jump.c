@@ -29,24 +29,18 @@
 #include <errno.h>
 
 // TODO:
-// * more highlight determination (distinguish between symbol / alphanumeric)
 // * implement dimming of non-highlight chars
 // * condition jump-mode on compiling without NANO_TINY
-// * add nanorc options to enable:
-//   - jumping inside words
-//   - setting `label_chars`
-//   - screen behavior when moving cursor (default no centering)
-//   - highlight mode (color or bolding)
 
-static bool look_inside_words = false;
-static char *label_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-static bool recenter_screen = false;
+static char *default_label_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+char *jump_mode_label_chars = NULL;
 
 #ifdef DISABLE_COLOR
 static bool use_color = false;
 #else
 static bool use_color = true;
 #endif
+
 static int highlight_color = COLOR_YELLOW;
 static attr_t color_highlight_attr = A_STANDOUT | COLOR_PAIR(1);
 static attr_t nocolor_highlight_attr = A_STANDOUT;
@@ -84,10 +78,12 @@ void move_cursor(ssize_t line, ssize_t column);
 
 // the main read-eval-jump loop:
 void do_jump(void) {
-	// read color preferences here
-	if (use_color && !has_colors()) { use_color = false; }
+	if (!has_colors() || ISSET(JUMP_NOCOLOR)) { use_color = false; }
 	if (use_color) {
 		init_pair(1, highlight_color, COLOR_BLACK);
+	}
+	if (jump_mode_label_chars == NULL) {
+		jump_mode_label_chars = default_label_chars;
 	}
 
 	char head_char = do_char_prompt(_("Head char: "));
@@ -105,10 +101,10 @@ void do_jump(void) {
 	}
 	
 	// setup
-	node_t *heads[strlen(label_chars)];
-	node_t *tails[strlen(label_chars)];
+	node_t *heads[strlen(jump_mode_label_chars)];
+	node_t *tails[strlen(jump_mode_label_chars)];
 	node_t *saved_head = NULL, *saved_tail = NULL; // when we recurse on chars
-	for (int i = 0; i < strlen(label_chars); i++) {
+	for (int i = 0; i < strlen(jump_mode_label_chars); i++) {
 		heads[i] = NULL; tails[i] = NULL;
 	}
 
@@ -159,7 +155,8 @@ void do_jump(void) {
 		}
 
 		// see what index the user picked
-		int list_idx = (int)(strchr(label_chars, select_char) - label_chars);
+		int list_idx = (int)(strchr(jump_mode_label_chars,
+		                            select_char) - jump_mode_label_chars);
 		if ((list_idx < 0) || (list_idx >= num_highlighted)) {
 			cleanup_highlight(edit, heads, tails);
 			statusbar(_("jump-mode: No such position candidate"));
@@ -168,7 +165,7 @@ void do_jump(void) {
 
 		// get the list of chars corresponding to index
 		node_t *list = heads[list_idx];
-		if (num_highlighted > strlen(label_chars)) {
+		if (num_highlighted > strlen(jump_mode_label_chars)) {
 			do { // back up the list before cleaning this hilite
 				emplace(list, &saved_head, &saved_tail);
 				list = list->next;
@@ -185,7 +182,7 @@ void do_jump(void) {
 	}
 	
 	cleanup_highlight(edit, heads, tails);
-	if (recenter_screen) {
+	if (ISSET(JUMP_CENTER)) {
 		do_gotolinecolumn(final_line, final_col + 1, false, false);
 	} else {
 		move_cursor(final_line, final_col + 1);
@@ -276,7 +273,9 @@ int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
 	int line = openfile->edittop->lineno;
 	int col = openfile->firstcolumn;
 	char *at = &line_ptr->data[col];
-	bool prev_was_space = true;
+	
+	bool next_starts_word = true;
+	char prev_char = '\0';
 	
 	while ((y <= max_y) && (x <= max_x) && (line_ptr != NULL)) {
 		if (*at == '\0') { // reached the end of the line data
@@ -284,30 +283,32 @@ int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
 			y++; x = 0;
 			if (line_ptr->next == NULL) { break; }
 			if (line_ptr->next->lineno != line_ptr->lineno) {
-				prev_was_space = true;
+				prev_char = '\0';
+				next_starts_word = true;
 			}
 			line_ptr = line_ptr->next;
 			at = &line_ptr->data[col];
 			continue;
 		} else {
 			if (tolower(*at) == c) {
-				if (prev_was_space) {
+				if (ISSET(JUMP_INSIDE) || (next_starts_word && (prev_char != tolower(*at)))) {
 					wattron(win, use_color ? color_highlight_attr : nocolor_highlight_attr);
-					mvwaddch(win, y, x, label_chars[p]);
+					mvwaddch(win, y, x, jump_mode_label_chars[p]);
 
 					node_t new = (node_t){y, x, line, col, *at, NULL};
 					emplace(&new, &heads[p], &tails[p]);
 				
 					p++;
-					if (label_chars[p] == '\0') { p = 0; }
+					if (jump_mode_label_chars[p] == '\0') { p = 0; }
 					num_highlighted++;
 				
 					wattroff(win, use_color ? color_highlight_attr : nocolor_highlight_attr);
 				}
 			}
 		}
-		
-		prev_was_space = (*at == ' ');
+
+		prev_char = tolower(*at);
+		next_starts_word = !is_alnum_mbchar(at);
 		size_t charwidth = 0;
 		parse_mbchar(at, NULL, &charwidth);
 		col += charwidth;
@@ -316,7 +317,8 @@ int do_highlight_char(WINDOW *win, char c, node_t **heads, node_t **tails) {
 		if (x >= editwincols) {
 			y++; x = 0;
 			if (!ISSET(SOFTWRAP) && (*at != '\0')) { // reached the end of the screen but there's more
-				prev_was_space = true;
+				prev_char = '\0';
+				next_starts_word = true;
 				line_ptr = line_ptr->next;
 				if (line_ptr == NULL) { break; }
 				line++; col = 0;
@@ -338,12 +340,12 @@ int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tail
 
 	while (these != NULL) {
 		wattron(win, use_color ? color_highlight_attr : nocolor_highlight_attr);
-		mvwaddch(win, these->y, these->x, label_chars[p]);
+		mvwaddch(win, these->y, these->x, jump_mode_label_chars[p]);
 
 		emplace(these, &heads[p], &tails[p]);
 		
 		p++;
-		if (label_chars[p] == '\0') { p = 0; }
+		if (jump_mode_label_chars[p] == '\0') { p = 0; }
 		num_highlighted++;
 
 		these = these->next;
@@ -357,7 +359,7 @@ int do_highlight_these(WINDOW *win, node_t *these, node_t **heads, node_t **tail
 }
 
 void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails) {
-	for (int i = 0; i < strlen(label_chars); i++) {
+	for (int i = 0; i < strlen(jump_mode_label_chars); i++) {
 		node_t *cur = heads[i];
 		while (cur != NULL) {
 			node_t *trash = cur;
@@ -372,7 +374,7 @@ void cleanup_highlight(WINDOW *win, node_t **heads, node_t **tails) {
 	}
 	wrefresh(win);
 
-	for (int i = 0; i < strlen(label_chars); i++) {
+	for (int i = 0; i < strlen(jump_mode_label_chars); i++) {
 		heads[i] = NULL; tails[i] = NULL;
 	}
 }
